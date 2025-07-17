@@ -5,7 +5,7 @@ TELEGRAM_HASH = "013a5c0b1f2c320b98236cf212835d59"                          # Re
 
 # OPTIONAL CONFIG
 USER_SESSION_STRING = ""                    # Require restart after changing it while bot running
-DATABASE_URL = "mongodb+srv://YKDB03:YKDB03@cluster0.b6obt.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"                           # Require restart after changing it while bot running
+DATABASE_URL = ""                           # Require restart after changing it while bot running
 DOWNLOAD_DIR = "/usr/src/app/downloads/"    # Require restart after changing it while bot running
 CMD_SUFFIX = ""                             # Require restart after changing it while bot running
 AUTHORIZED_CHATS = "-1002312629309"                       # Require restart after changing it while bot running
