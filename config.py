@@ -1,4 +1,7 @@
-BOT_TOKEN = "7288591140:AAFwBIK2m-RIOT-tljZXawBcdGzW60LkIxQ"                              # Require restart after changing it while bot running
+# Remove this line before deploying
+_____REMOVE_THIS_LINE_____=True
+# REQUIRED CONFIG
+BOT_TOKEN = "7288591140:AAH4g1A92oz0U_mE78UrcptJhIjZYfuBv0U"                              # Require restart after changing it while bot running
 OWNER_ID = "6048003536"                               # Require restart after changing it while bot running
 TELEGRAM_API = "27050683"                           # Require restart after changing it while bot running
 TELEGRAM_HASH = "013a5c0b1f2c320b98236cf212835d59"                          # Require restart after changing it while bot running
@@ -133,7 +136,7 @@ EXCEP_CHATS = ""
 
 # M/L Buttons
 SCREENSHOTS_MODE = "False"
-SHOW_MEDIAINFO = "False"
+SHOW_MEDIAINFO = "True"
 SAVE_MSG = "False"
 SOURCE_LINK = "False"
 
