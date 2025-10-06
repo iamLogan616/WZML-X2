@@ -12,7 +12,7 @@ from asyncio.subprocess import PIPE
 from telegraph import upload_file
 from langcodes import Language
 
-from bot import LOGGER, MAX_SPLIT_SIZE, config_dict, user_data, bot
+from bot import LOGGER, MAX_SPLIT_SIZE, config_dict, user_data
 from bot.modules.mediainfo import parseinfo
 from bot.helper.ext_utils.bot_utils import (
     cmd_exec,
@@ -155,7 +155,7 @@ async def get_document_type(path):
     return is_video, is_audio, is_image
 
 
-async def get_audio_thumb(audio_file, user_id=None, message=None):
+async def get_audio_thumb(audio_file):
     des_dir = "Thumbnails"
     if not await aiopath.exists(des_dir):
         await mkdir(des_dir)
@@ -178,21 +178,11 @@ async def get_audio_thumb(audio_file, user_id=None, message=None):
         LOGGER.error(
             f"Error while extracting thumbnail from audio. Name: {audio_file} stderr: {err}"
         )
-        # Send THUMB FAILED notification to user
-        if user_id and message:
-            try:
-                await bot.send_message(
-                    chat_id=user_id,
-                    text="❌ THUMB FAILED - Audio thumbnail extraction failed. Please upload a custom thumbnail using /thumb command with image URL.",
-                    reply_to_message_id=message.id
-                )
-            except Exception as e:
-                LOGGER.error(f"Failed to send thumb failed notification: {e}")
         return None
     return des_dir
 
 
-async def take_ss(video_file, duration=None, total=1, gen_ss=False, user_id=None, message=None):
+async def take_ss(video_file, duration=None, total=1, gen_ss=False):
     des_dir = ospath.join("Thumbnails", f"{time()}")
     await makedirs(des_dir, exist_ok=True)
     if duration is None:
@@ -231,7 +221,6 @@ async def take_ss(video_file, duration=None, total=1, gen_ss=False, user_id=None
     tasks = [extract_ss(eq_thumb) for eq_thumb in range(1, total + 1)]
     status = await gather(*tasks)
 
-    failed_thumbs = []
     for task, rtype, eq_thumb in status:
         if rtype != 0 or not await aiopath.exists(
             ospath.join(des_dir, f"wz_thumb_{eq_thumb}.jpg")
@@ -240,30 +229,9 @@ async def take_ss(video_file, duration=None, total=1, gen_ss=False, user_id=None
             LOGGER.error(
                 f"Error while extracting thumbnail no. {eq_thumb} from video. Name: {video_file} stderr: {err}"
             )
-            failed_thumbs.append(eq_thumb)
-
-    # If all thumbnails failed, send notification
-    if len(failed_thumbs) == total and user_id and message:
-        try:
-            await bot.send_message(
-                chat_id=user_id,
-                text="❌ THUMB FAILED - Video thumbnail extraction failed. Please upload a custom thumbnail using /thumb command with image URL.",
-                reply_to_message_id=message.id
-            )
             await aiormtree(des_dir)
             return None
-        except Exception as e:
-            LOGGER.error(f"Failed to send thumb failed notification: {e}")
-
-    # If some thumbnails failed but we have at least one success, continue
-    if failed_thumbs and await aiopath.exists(ospath.join(des_dir, "wz_thumb_1.jpg")):
-        LOGGER.warning(f"Some thumbnails failed to extract: {failed_thumbs}")
-        return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
-    elif not failed_thumbs:
-        return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
-    else:
-        await aiormtree(des_dir)
-        return None
+    return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
 
 
 async def split_file(
@@ -535,11 +503,9 @@ async def format_filename(file_, user_id, dirpath=None, isMirror=False):
     return file_, cap_mono
 
 
-async def get_ss(up_path, ss_no, user_id=None, message=None):
-    thumbs_path, tstamps = await take_ss(up_path, total=min(ss_no, 250), gen_ss=True, user_id=user_id, message=message)
-    if not thumbs_path:
-        return None
-    th_html = f"📌 <h4>{ospath.basename(up_path)}</h4><br>📇 <b>Total Screenshots:</b> {ss_no}<br><br>"
+async def get_ss(up_path, ss_no):
+    thumbs_path, tstamps = await take_ss(up_path, total=min(ss_no, 250), gen_ss=True)
+    th_html = f"ðŸ“Œ <h4>{ospath.basename(up_path)}</h4><br>ðŸ“‡ <b>Total Screenshots:</b> {ss_no}<br><br>"
     up_sem = Semaphore(25)
 
     async def telefile(thumb):
@@ -562,7 +528,7 @@ async def get_ss(up_path, ss_no, user_id=None, message=None):
 
 async def get_mediainfo_link(up_path):
     stdout, __, _ = await cmd_exec(ssplit(f'mediainfo "{up_path}"'))
-    tc = f"📌 <h4>{ospath.basename(up_path)}</h4><br><br>"
+    tc = f"ðŸ“Œ <h4>{ospath.basename(up_path)}</h4><br><br>"
     if len(stdout) != 0:
         tc += parseinfo(stdout)
     link_id = (await telegraph.create_page(title="MediaInfo X", content=tc))["path"]
@@ -575,44 +541,3 @@ def get_md5_hash(up_path):
         for byte_block in iter(lambda: f.read(4096), b""):
             md5_hash.update(byte_block)
         return md5_hash.hexdigest()
-
-
-# Custom thumbnail upload function
-async def upload_custom_thumb(thumb_url, user_id):
-    """
-    Upload custom thumbnail from URL
-    Returns path to downloaded thumbnail or None if failed
-    """
-    try:
-        import requests
-        from PIL import Image
-        import io
-        
-        # Download thumbnail
-        response = requests.get(thumb_url, timeout=30)
-        if response.status_code == 200:
-            # Validate image
-            image = Image.open(io.BytesIO(response.content))
-            image.verify()
-            
-            # Save thumbnail
-            thumb_dir = "Thumbnails"
-            if not await aiopath.exists(thumb_dir):
-                await mkdir(thumb_dir)
-                
-            thumb_path = ospath.join(thumb_dir, f"custom_thumb_{user_id}.jpg")
-            
-            # Convert to JPEG if needed and save
-            image = Image.open(io.BytesIO(response.content))
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            image.save(thumb_path, 'JPEG')
-            
-            LOGGER.info(f"Custom thumbnail uploaded for user {user_id}")
-            return thumb_path
-        else:
-            LOGGER.error(f"Failed to download thumbnail from {thumb_url}. Status: {response.status_code}")
-            return None
-    except Exception as e:
-        LOGGER.error(f"Error uploading custom thumbnail: {e}")
-        return None
