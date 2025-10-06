@@ -12,7 +12,7 @@ from asyncio.subprocess import PIPE
 from telegraph import upload_file
 from langcodes import Language
 
-from bot import LOGGER, MAX_SPLIT_SIZE, config_dict, user_data
+from bot import LOGGER, MAX_SPLIT_SIZE, config_dict, user_data, bot
 from bot.modules.mediainfo import parseinfo
 from bot.helper.ext_utils.bot_utils import (
     cmd_exec,
@@ -55,47 +55,6 @@ async def is_multi_streams(path):
         elif stream.get("codec_type") == "audio":
             audios += 1
     return videos > 1 or audios > 1
-
-
-async def get_video_codec_info(path):
-    """Get detailed video codec information"""
-    try:
-        result = await cmd_exec(
-            [
-                "ffprobe",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-print_format",
-                "json",
-                "-select_streams",
-                "v:0",
-                "-show_streams",
-                path,
-            ]
-        )
-        if res := result[1]:
-            LOGGER.warning(f"Get Video Codec Info: {res}")
-            return None
-    except Exception as e:
-        LOGGER.error(f"Get Video Codec Info: {e}")
-        return None
-    
-    ffresult = eval(result[0])
-    streams = ffresult.get("streams", [])
-    if not streams:
-        return None
-    
-    video_stream = streams[0]
-    return {
-        'codec_name': video_stream.get('codec_name', ''),
-        'profile': video_stream.get('profile', ''),
-        'width': video_stream.get('width', 0),
-        'height': video_stream.get('height', 0),
-        'pix_fmt': video_stream.get('pix_fmt', ''),
-        'bit_rate': video_stream.get('bit_rate', 0),
-        'duration': video_stream.get('duration', 0)
-    }
 
 
 async def get_media_info(path, metadata=False):
@@ -196,7 +155,7 @@ async def get_document_type(path):
     return is_video, is_audio, is_image
 
 
-async def get_audio_thumb(audio_file):
+async def get_audio_thumb(audio_file, user_id=None, message=None):
     des_dir = "Thumbnails"
     if not await aiopath.exists(des_dir):
         await mkdir(des_dir)
@@ -219,136 +178,21 @@ async def get_audio_thumb(audio_file):
         LOGGER.error(
             f"Error while extracting thumbnail from audio. Name: {audio_file} stderr: {err}"
         )
+        # Send THUMB FAILED notification to user
+        if user_id and message:
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text="❌ THUMB FAILED - Audio thumbnail extraction failed. Please upload a custom thumbnail using /thumb command with image URL.",
+                    reply_to_message_id=message.id
+                )
+            except Exception as e:
+                LOGGER.error(f"Failed to send thumb failed notification: {e}")
         return None
     return des_dir
 
 
-async def advanced_thumbnail_extractor(video_file, total=1, gen_ss=False):
-    """
-    Advanced thumbnail extractor optimized for 1080p HEVC x265 videos
-    with enhanced quality and performance
-    """
-    des_dir = ospath.join("Thumbnails", f"advanced_{time()}")
-    await makedirs(des_dir, exist_ok=True)
-    
-    # Get video codec information
-    codec_info = await get_video_codec_info(video_file)
-    duration = (await get_media_info(video_file))[0]
-    
-    if duration == 0:
-        duration = 3
-    duration = duration - (duration * 2 / 100)
-    
-    # Optimize settings based on codec
-    is_hevc = codec_info and codec_info.get('codec_name', '').lower() in ['hevc', 'h265']
-    is_1080p = codec_info and codec_info.get('height', 0) == 1080
-    
-    # Enhanced filter chain for better quality
-    if is_hevc and is_1080p:
-        # Optimized for HEVC 1080p
-        vf_filter = "scale=iw*sar:ih,scale='min(1920,iw)':'min(1080,ih)':flags=lanczos:force_original_aspect_ratio=decrease,thumbnail=100,format=yuvj420p"
-        quality_settings = ["-qscale:v", "2"]
-    else:
-        # Standard high quality settings
-        vf_filter = "scale=iw*sar:ih,scale='min(1920,iw)':'min(1080,ih)':flags=lanczos:force_original_aspect_ratio=decrease,format=yuvj420p"
-        quality_settings = ["-qscale:v", "2"]
-    
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-ss", "",
-        "-i", video_file,
-        "-vf", vf_filter,
-        "-frames:v", "1",
-        "-vsync", "vfr",
-        *quality_settings,
-        "-y",  # Overwrite output files
-        ""
-    ]
-    
-    tstamps = {}
-    thumb_sem = Semaphore(3)
-
-    async def extract_ss(eq_thumb):
-        async with thumb_sem:
-            timestamp = str((duration // total) * eq_thumb)
-            cmd[5] = timestamp
-            tstamps[f"adv_thumb_{eq_thumb}.jpg"] = strftime(
-                "%H:%M:%S", gmtime(float(timestamp))
-            )
-            output_file = ospath.join(des_dir, f"adv_thumb_{eq_thumb}.jpg")
-            cmd[-1] = output_file
-            
-            task = await create_subprocess_exec(*cmd, stderr=PIPE)
-            return_code = await task.wait()
-            
-            if return_code != 0 or not await aiopath.exists(output_file):
-                # Fallback to basic thumbnail extraction
-                return await extract_basic_thumbnail(video_file, timestamp, eq_thumb, des_dir, tstamps)
-            
-            return (task, return_code, eq_thumb)
-
-    tasks = [extract_ss(eq_thumb) for eq_thumb in range(1, total + 1)]
-    status = await gather(*tasks)
-
-    for task, rtype, eq_thumb in status:
-        if rtype != 0 or not await aiopath.exists(
-            ospath.join(des_dir, f"adv_thumb_{eq_thumb}.jpg")
-        ):
-            err = (await task.stderr.read()).decode().strip()
-            LOGGER.warning(
-                f"Advanced thumbnail extraction failed for thumb {eq_thumb}. Falling back to basic method. Error: {err}"
-            )
-    
-    return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "adv_thumb_1.jpg")
-
-
-async def extract_basic_thumbnail(video_file, timestamp, eq_thumb, des_dir, tstamps):
-    """Fallback basic thumbnail extraction"""
-    basic_cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "error",
-        "-ss", timestamp,
-        "-i", video_file,
-        "-vf", "thumbnail",
-        "-frames:v", "1",
-        "-vsync", "vfr",
-        "-qscale:v", "5",
-        "-y",
-        ospath.join(des_dir, f"basic_thumb_{eq_thumb}.jpg")
-    ]
-    
-    task = await create_subprocess_exec(*basic_cmd, stderr=PIPE)
-    return_code = await task.wait()
-    
-    # Rename to maintain consistency
-    if return_code == 0 and await aiopath.exists(ospath.join(des_dir, f"basic_thumb_{eq_thumb}.jpg")):
-        await aioremove(ospath.join(des_dir, f"adv_thumb_{eq_thumb}.jpg")) if await aiopath.exists(ospath.join(des_dir, f"adv_thumb_{eq_thumb}.jpg")) else None
-        await create_subprocess_exec(
-            "mv", 
-            ospath.join(des_dir, f"basic_thumb_{eq_thumb}.jpg"), 
-            ospath.join(des_dir, f"adv_thumb_{eq_thumb}.jpg")
-        )
-    
-    return (task, return_code, eq_thumb)
-
-
-async def take_ss(video_file, duration=None, total=1, gen_ss=False, use_advanced=True):
-    """
-    Enhanced screenshot function with advanced thumbnail extraction
-    """
-    # Use advanced extractor for HEVC x265 1080p videos
-    if use_advanced:
-        codec_info = await get_video_codec_info(video_file)
-        is_hevc_1080p = codec_info and codec_info.get('codec_name', '').lower() in ['hevc', 'h265'] and codec_info.get('height', 0) == 1080
-        
-        if is_hevc_1080p:
-            LOGGER.info("Using advanced thumbnail extractor for 1080p HEVC x265 video")
-            return await advanced_thumbnail_extractor(video_file, total, gen_ss)
-    
-    # Fallback to original method
+async def take_ss(video_file, duration=None, total=1, gen_ss=False, user_id=None, message=None):
     des_dir = ospath.join("Thumbnails", f"{time()}")
     await makedirs(des_dir, exist_ok=True)
     if duration is None:
@@ -387,6 +231,7 @@ async def take_ss(video_file, duration=None, total=1, gen_ss=False, use_advanced
     tasks = [extract_ss(eq_thumb) for eq_thumb in range(1, total + 1)]
     status = await gather(*tasks)
 
+    failed_thumbs = []
     for task, rtype, eq_thumb in status:
         if rtype != 0 or not await aiopath.exists(
             ospath.join(des_dir, f"wz_thumb_{eq_thumb}.jpg")
@@ -395,9 +240,30 @@ async def take_ss(video_file, duration=None, total=1, gen_ss=False, use_advanced
             LOGGER.error(
                 f"Error while extracting thumbnail no. {eq_thumb} from video. Name: {video_file} stderr: {err}"
             )
+            failed_thumbs.append(eq_thumb)
+
+    # If all thumbnails failed, send notification
+    if len(failed_thumbs) == total and user_id and message:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text="❌ THUMB FAILED - Video thumbnail extraction failed. Please upload a custom thumbnail using /thumb command with image URL.",
+                reply_to_message_id=message.id
+            )
             await aiormtree(des_dir)
             return None
-    return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
+        except Exception as e:
+            LOGGER.error(f"Failed to send thumb failed notification: {e}")
+
+    # If some thumbnails failed but we have at least one success, continue
+    if failed_thumbs and await aiopath.exists(ospath.join(des_dir, "wz_thumb_1.jpg")):
+        LOGGER.warning(f"Some thumbnails failed to extract: {failed_thumbs}")
+        return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
+    elif not failed_thumbs:
+        return (des_dir, tstamps) if gen_ss else ospath.join(des_dir, "wz_thumb_1.jpg")
+    else:
+        await aiormtree(des_dir)
+        return None
 
 
 async def split_file(
@@ -669,17 +535,10 @@ async def format_filename(file_, user_id, dirpath=None, isMirror=False):
     return file_, cap_mono
 
 
-async def get_ss(up_path, ss_no):
-    # Use advanced thumbnail extraction for better quality
-    codec_info = await get_video_codec_info(up_path)
-    is_hevc_1080p = codec_info and codec_info.get('codec_name', '').lower() in ['hevc', 'h265'] and codec_info.get('height', 0) == 1080
-    
-    if is_hevc_1080p:
-        LOGGER.info("Using advanced screenshot extraction for 1080p HEVC x265 video")
-        thumbs_path, tstamps = await advanced_thumbnail_extractor(up_path, total=min(ss_no, 250), gen_ss=True)
-    else:
-        thumbs_path, tstamps = await take_ss(up_path, total=min(ss_no, 250), gen_ss=True)
-    
+async def get_ss(up_path, ss_no, user_id=None, message=None):
+    thumbs_path, tstamps = await take_ss(up_path, total=min(ss_no, 250), gen_ss=True, user_id=user_id, message=message)
+    if not thumbs_path:
+        return None
     th_html = f"📌 <h4>{ospath.basename(up_path)}</h4><br>📇 <b>Total Screenshots:</b> {ss_no}<br><br>"
     up_sem = Semaphore(25)
 
@@ -716,3 +575,44 @@ def get_md5_hash(up_path):
         for byte_block in iter(lambda: f.read(4096), b""):
             md5_hash.update(byte_block)
         return md5_hash.hexdigest()
+
+
+# Custom thumbnail upload function
+async def upload_custom_thumb(thumb_url, user_id):
+    """
+    Upload custom thumbnail from URL
+    Returns path to downloaded thumbnail or None if failed
+    """
+    try:
+        import requests
+        from PIL import Image
+        import io
+        
+        # Download thumbnail
+        response = requests.get(thumb_url, timeout=30)
+        if response.status_code == 200:
+            # Validate image
+            image = Image.open(io.BytesIO(response.content))
+            image.verify()
+            
+            # Save thumbnail
+            thumb_dir = "Thumbnails"
+            if not await aiopath.exists(thumb_dir):
+                await mkdir(thumb_dir)
+                
+            thumb_path = ospath.join(thumb_dir, f"custom_thumb_{user_id}.jpg")
+            
+            # Convert to JPEG if needed and save
+            image = Image.open(io.BytesIO(response.content))
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            image.save(thumb_path, 'JPEG')
+            
+            LOGGER.info(f"Custom thumbnail uploaded for user {user_id}")
+            return thumb_path
+        else:
+            LOGGER.error(f"Failed to download thumbnail from {thumb_url}. Status: {response.status_code}")
+            return None
+    except Exception as e:
+        LOGGER.error(f"Error uploading custom thumbnail: {e}")
+        return None
